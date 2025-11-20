@@ -327,15 +327,34 @@ class WanKeyframesToVideo(io.ComfyNode):
         image = torch.ones((length, height, width, 3), device=keyframes.device, dtype=keyframes.dtype) * 0.5
         mask = torch.ones((1, 1, latent.shape[2] * 4, latent.shape[-2], latent.shape[-1]), device=keyframes.device, dtype=keyframes.dtype)
 
-        # Insert keyframes at specified positions
+        # Insert keyframes and set mask regions
+        # Calculate safe mask expansion for each keyframe to avoid overlaps
         for i, pos in enumerate(positions):
             if i < num_keyframes:
                 image[pos] = keyframes[i]
-                # Set mask to 0.0 at keyframe position with smooth transition
-                # Using +3 frames for smooth blending like in original node
-                mask_start = max(0, pos - 1)
-                mask_end = min(length, pos + 4)
-                mask[:, :, mask_start:mask_end] = 0.0
+
+                # Calculate distance to neighbors for adaptive masking
+                dist_to_prev = pos - positions[i-1] if i > 0 else pos
+                dist_to_next = positions[i+1] - pos if i < num_keyframes - 1 else (length - 1) - pos
+
+                # Set mask regions based on position
+                if i == 0:
+                    # First keyframe: extend mask forward (like original WanFirstLastFrameToVideo)
+                    mask_end = min(pos + 4, length)
+                    mask[:, :, :mask_end] = 0.0
+                elif i == num_keyframes - 1:
+                    # Last keyframe: extend mask to end (like original WanFirstLastFrameToVideo)
+                    mask[:, :, pos:] = 0.0
+                else:
+                    # Middle keyframes: use adaptive masking
+                    # Expand by up to 3 frames in each direction, but not beyond halfway to neighbors
+                    max_expand = 3
+                    expand_before = min(max_expand, dist_to_prev // 2)
+                    expand_after = min(max_expand, dist_to_next // 2)
+
+                    mask_start = max(0, pos - expand_before)
+                    mask_end = min(length, pos + expand_after + 1)
+                    mask[:, :, mask_start:mask_end] = 0.0
 
         # Encode image to latent
         concat_latent_image = vae.encode(image[:, :, :, :3])
