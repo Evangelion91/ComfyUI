@@ -339,12 +339,21 @@ class WanKeyframesToVideo(io.ComfyNode):
         mask = torch.ones((1, 1, latent_t * 4, latent.shape[-2], latent.shape[-1]), device=keyframes.device, dtype=keyframes.dtype)
 
         # Insert keyframes and set mask regions
+        # CRITICAL: Fill entire latent frames with keyframe content, not just single frames
         for i, pos in enumerate(positions):
             if i < num_keyframes:
-                image[pos] = keyframes[i]
-
                 # Calculate which latent frame this position belongs to
                 latent_idx = min(pos // 4, latent_t - 1)
+
+                # Calculate the range of frames in this latent frame
+                latent_start = latent_idx * 4
+                latent_end = min((latent_idx + 1) * 4, length)
+
+                # Fill the ENTIRE latent frame with this keyframe
+                # This is crucial: WanFirstLastFrameToVideo fills multiple frames, not just one
+                for frame_idx in range(latent_start, latent_end):
+                    if frame_idx < length:
+                        image[frame_idx] = keyframes[i]
 
                 # Set mask regions based on position
                 if i == 0:
