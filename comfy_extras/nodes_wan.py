@@ -299,67 +299,75 @@ class WanKeyframesToVideo(io.ComfyNode):
     @classmethod
     def execute(cls, positive, negative, vae, width, height, length, batch_size, keyframes, keyframe_positions="", clip_vision_output=None) -> io.NodeOutput:
         spacial_scale = vae.spacial_compression_encode()
-        latent = torch.zeros([batch_size, vae.latent_channels, ((length - 1) // 4) + 1, height // spacial_scale, width // spacial_scale], device=comfy.model_management.intermediate_device())
+        latent_t = ((length - 1) // 4) + 1  # Latent temporal dimension
+        latent = torch.zeros([batch_size, vae.latent_channels, latent_t, height // spacial_scale, width // spacial_scale], device=comfy.model_management.intermediate_device())
 
         # Upscale keyframes
         keyframes = comfy.utils.common_upscale(keyframes.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
         num_keyframes = keyframes.shape[0]
 
-        # Parse or calculate keyframe positions
+        # Parse or calculate keyframe positions (aligned to latent frame boundaries)
         if keyframe_positions and keyframe_positions.strip():
-            # Parse comma-separated positions
+            # Parse comma-separated positions and align to latent boundaries (multiples of 4)
             positions = [int(p.strip()) for p in keyframe_positions.split(',')]
-            positions = [max(0, min(p, length - 1)) for p in positions]  # Clamp to valid range
+            positions = [max(0, min(p, length - 1)) for p in positions]
         else:
-            # Automatically distribute keyframes evenly
+            # Automatically distribute keyframes evenly, aligned to latent boundaries
             if num_keyframes == 1:
                 positions = [0]
             elif num_keyframes == 2:
                 positions = [0, length - 1]
             else:
-                # Distribute evenly from start to end
-                positions = [int(i * (length - 1) / (num_keyframes - 1)) for i in range(num_keyframes)]
+                # Distribute across latent frames, not individual image frames
+                # This ensures keyframes align with latent frame boundaries
+                available_latent_frames = latent_t - 1  # 0 to latent_t-1
+                if num_keyframes > available_latent_frames + 1:
+                    # Too many keyframes, distribute evenly in image space
+                    positions = [int(i * (length - 1) / (num_keyframes - 1)) for i in range(num_keyframes)]
+                else:
+                    # Distribute across latent frames
+                    latent_positions = [int(i * available_latent_frames / (num_keyframes - 1)) for i in range(num_keyframes)]
+                    # Convert latent positions to image frame positions (multiply by 4)
+                    positions = [min(lp * 4, length - 1) for lp in latent_positions]
 
         # Ensure we have matching number of positions and keyframes
         positions = positions[:num_keyframes]
 
         # Create base image and mask
         image = torch.ones((length, height, width, 3), device=keyframes.device, dtype=keyframes.dtype) * 0.5
-        mask = torch.ones((1, 1, latent.shape[2] * 4, latent.shape[-2], latent.shape[-1]), device=keyframes.device, dtype=keyframes.dtype)
+        # Mask size: latent_t * 4 to account for 4 sub-frames per latent
+        mask = torch.ones((1, 1, latent_t * 4, latent.shape[-2], latent.shape[-1]), device=keyframes.device, dtype=keyframes.dtype)
 
         # Insert keyframes and set mask regions
-        # Calculate safe mask expansion for each keyframe to avoid overlaps
         for i, pos in enumerate(positions):
             if i < num_keyframes:
                 image[pos] = keyframes[i]
 
-                # Calculate distance to neighbors for adaptive masking
-                dist_to_prev = pos - positions[i-1] if i > 0 else pos
-                dist_to_next = positions[i+1] - pos if i < num_keyframes - 1 else (length - 1) - pos
+                # Calculate which latent frame this position belongs to
+                latent_idx = min(pos // 4, latent_t - 1)
 
                 # Set mask regions based on position
                 if i == 0:
-                    # First keyframe: extend mask forward (like original WanFirstLastFrameToVideo)
-                    mask_end = min(pos + 4, length)
+                    # First keyframe: mask from start up to and including this latent frame
+                    # Similar to WanFirstLastFrameToVideo: mask first frame + 3 more
+                    mask_end = min((latent_idx + 1) * 4, latent_t * 4)
                     mask[:, :, :mask_end] = 0.0
                 elif i == num_keyframes - 1:
-                    # Last keyframe: extend mask to end (like original WanFirstLastFrameToVideo)
+                    # Last keyframe: mask from this position to end
+                    # Keep original behavior for last frame
                     mask[:, :, pos:] = 0.0
                 else:
-                    # Middle keyframes: use adaptive masking
-                    # Expand by up to 3 frames in each direction, but not beyond halfway to neighbors
-                    max_expand = 3
-                    expand_before = min(max_expand, dist_to_prev // 2)
-                    expand_after = min(max_expand, dist_to_next // 2)
-
-                    mask_start = max(0, pos - expand_before)
-                    mask_end = min(length, pos + expand_after + 1)
+                    # Middle keyframes: mask the entire latent frame containing this keyframe
+                    # This ensures the keyframe is properly preserved in latent space
+                    mask_start = latent_idx * 4
+                    mask_end = min((latent_idx + 1) * 4, latent_t * 4)
                     mask[:, :, mask_start:mask_end] = 0.0
 
         # Encode image to latent
         concat_latent_image = vae.encode(image[:, :, :, :3])
 
-        # Reshape mask to match expected format
+        # Reshape mask to match expected format: (1, 4, latent_t, H, W)
+        # This groups every 4 frames together as sub-frames of a latent frame
         mask = mask.view(1, mask.shape[2] // 4, 4, mask.shape[3], mask.shape[4]).transpose(1, 2)
 
         # Set conditioning values
