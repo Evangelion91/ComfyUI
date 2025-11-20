@@ -250,6 +250,149 @@ class WanFirstLastFrameToVideo(io.ComfyNode):
         return io.NodeOutput(positive, negative, out_latent)
 
 
+class WanKeyframesToVideo(io.ComfyNode):
+    """
+    Video generation node supporting multiple keyframes.
+
+    This node extends WanFirstLastFrameToVideo functionality to support N keyframes
+    instead of just start/end frames. Keyframes can be automatically distributed evenly
+    across the video length or positioned at specific frame indices.
+
+    The node maintains full compatibility with existing sampler nodes by using the same
+    concat_latent_image and concat_mask mechanism as WanFirstLastFrameToVideo.
+
+    Args:
+        keyframes: Batch of images to use as reference frames
+        keyframe_positions: Optional comma-separated frame indices (e.g., "0,20,40,60,80")
+                           Leave empty for automatic even distribution
+
+    Behavior:
+        - High-noise phase: Sampler interpolates between all keyframe latents
+        - Low-noise phase: Smooth transitions between keyframes using masks
+        - Automatic position calculation for even distribution
+        - Manual position specification for precise control
+    """
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="WanKeyframesToVideo",
+            category="conditioning/video_models",
+            inputs=[
+                io.Conditioning.Input("positive"),
+                io.Conditioning.Input("negative"),
+                io.Vae.Input("vae"),
+                io.Int.Input("width", default=832, min=16, max=nodes.MAX_RESOLUTION, step=16),
+                io.Int.Input("height", default=480, min=16, max=nodes.MAX_RESOLUTION, step=16),
+                io.Int.Input("length", default=81, min=1, max=nodes.MAX_RESOLUTION, step=4),
+                io.Int.Input("batch_size", default=1, min=1, max=4096),
+                io.Image.Input("keyframes"),
+                io.String.Input("keyframe_positions", default="", multiline=False, tooltip="Comma-separated frame indices (e.g., '0,20,40,60,80'). Leave empty for automatic even distribution."),
+                io.ClipVisionOutput.Input("clip_vision_output", optional=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(display_name="positive"),
+                io.Conditioning.Output(display_name="negative"),
+                io.Latent.Output(display_name="latent"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, positive, negative, vae, width, height, length, batch_size, keyframes, keyframe_positions="", clip_vision_output=None) -> io.NodeOutput:
+        spacial_scale = vae.spacial_compression_encode()
+        latent_t = ((length - 1) // 4) + 1  # Latent temporal dimension
+        latent = torch.zeros([batch_size, vae.latent_channels, latent_t, height // spacial_scale, width // spacial_scale], device=comfy.model_management.intermediate_device())
+
+        # Upscale keyframes
+        keyframes = comfy.utils.common_upscale(keyframes.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+        num_keyframes = keyframes.shape[0]
+
+        # Parse or calculate keyframe positions (aligned to latent frame boundaries)
+        if keyframe_positions and keyframe_positions.strip():
+            # Parse comma-separated positions and align to latent boundaries (multiples of 4)
+            positions = [int(p.strip()) for p in keyframe_positions.split(',')]
+            positions = [max(0, min(p, length - 1)) for p in positions]
+        else:
+            # Automatically distribute keyframes evenly, aligned to latent boundaries
+            if num_keyframes == 1:
+                positions = [0]
+            elif num_keyframes == 2:
+                positions = [0, length - 1]
+            else:
+                # Distribute across latent frames, not individual image frames
+                # This ensures keyframes align with latent frame boundaries
+                available_latent_frames = latent_t - 1  # 0 to latent_t-1
+                if num_keyframes > available_latent_frames + 1:
+                    # Too many keyframes, distribute evenly in image space
+                    positions = [int(i * (length - 1) / (num_keyframes - 1)) for i in range(num_keyframes)]
+                else:
+                    # Distribute across latent frames
+                    latent_positions = [int(i * available_latent_frames / (num_keyframes - 1)) for i in range(num_keyframes)]
+                    # Convert latent positions to image frame positions (multiply by 4)
+                    positions = [min(lp * 4, length - 1) for lp in latent_positions]
+
+        # Ensure we have matching number of positions and keyframes
+        positions = positions[:num_keyframes]
+
+        # Create base image and mask
+        image = torch.ones((length, height, width, 3), device=keyframes.device, dtype=keyframes.dtype) * 0.5
+        # Mask size: latent_t * 4 to account for 4 sub-frames per latent
+        mask = torch.ones((1, 1, latent_t * 4, latent.shape[-2], latent.shape[-1]), device=keyframes.device, dtype=keyframes.dtype)
+
+        # Insert keyframes and set mask regions
+        # CRITICAL: Fill entire latent frames with keyframe content, not just single frames
+        for i, pos in enumerate(positions):
+            if i < num_keyframes:
+                # Calculate which latent frame this position belongs to
+                latent_idx = min(pos // 4, latent_t - 1)
+
+                # Calculate the range of frames in this latent frame
+                latent_start = latent_idx * 4
+                latent_end = min((latent_idx + 1) * 4, length)
+
+                # Fill the ENTIRE latent frame with this keyframe
+                # This is crucial: WanFirstLastFrameToVideo fills multiple frames, not just one
+                for frame_idx in range(latent_start, latent_end):
+                    if frame_idx < length:
+                        image[frame_idx] = keyframes[i]
+
+                # Set mask regions based on position
+                if i == 0:
+                    # First keyframe: mask from start up to and including this latent frame
+                    # Similar to WanFirstLastFrameToVideo: mask first frame + 3 more
+                    mask_end = min((latent_idx + 1) * 4, latent_t * 4)
+                    mask[:, :, :mask_end] = 0.0
+                elif i == num_keyframes - 1:
+                    # Last keyframe: mask from this position to end
+                    # Keep original behavior for last frame
+                    mask[:, :, pos:] = 0.0
+                else:
+                    # Middle keyframes: mask the entire latent frame containing this keyframe
+                    # This ensures the keyframe is properly preserved in latent space
+                    mask_start = latent_idx * 4
+                    mask_end = min((latent_idx + 1) * 4, latent_t * 4)
+                    mask[:, :, mask_start:mask_end] = 0.0
+
+        # Encode image to latent
+        concat_latent_image = vae.encode(image[:, :, :, :3])
+
+        # Reshape mask to match expected format: (1, 4, latent_t, H, W)
+        # This groups every 4 frames together as sub-frames of a latent frame
+        mask = mask.view(1, mask.shape[2] // 4, 4, mask.shape[3], mask.shape[4]).transpose(1, 2)
+
+        # Set conditioning values
+        positive = node_helpers.conditioning_set_values(positive, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
+        negative = node_helpers.conditioning_set_values(negative, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
+
+        # Add clip vision output if provided
+        if clip_vision_output is not None:
+            positive = node_helpers.conditioning_set_values(positive, {"clip_vision_output": clip_vision_output})
+            negative = node_helpers.conditioning_set_values(negative, {"clip_vision_output": clip_vision_output})
+
+        out_latent = {}
+        out_latent["samples"] = latent
+        return io.NodeOutput(positive, negative, out_latent)
+
+
 class WanFunInpaintToVideo(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -1298,6 +1441,7 @@ class WanExtension(ComfyExtension):
             Wan22FunControlToVideo,
             WanFunInpaintToVideo,
             WanFirstLastFrameToVideo,
+            WanKeyframesToVideo,
             WanVaceToVideo,
             TrimVideoLatent,
             WanCameraImageToVideo,
