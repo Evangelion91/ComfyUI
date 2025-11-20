@@ -333,14 +333,12 @@ class WanKeyframesToVideo(io.ComfyNode):
         # Ensure we have matching number of positions and keyframes
         positions = positions[:num_keyframes]
 
-        # Create base image and mask
+        # Create base image and mask (gray 0.5 like WanFirstLastFrameToVideo)
         image = torch.ones((length, height, width, 3), device=keyframes.device, dtype=keyframes.dtype) * 0.5
         # Mask size: latent_t * 4 to account for 4 sub-frames per latent
         mask = torch.ones((1, 1, latent_t * 4, latent.shape[-2], latent.shape[-1]), device=keyframes.device, dtype=keyframes.dtype)
 
-        # First pass: Fill keyframes into their latent frames
-        # CRITICAL: Fill entire latent frames with keyframe content for FIRST keyframe
-        # Last keyframe fills only from its position to end (matching WanFirstLastFrameToVideo)
+        # Fill keyframes and set masks - match WanFirstLastFrameToVideo logic exactly
         for i, pos in enumerate(positions):
             if i < num_keyframes:
                 # Calculate which latent frame this position belongs to
@@ -353,10 +351,16 @@ class WanKeyframesToVideo(io.ComfyNode):
                     for frame_idx in range(latent_start, latent_end):
                         if frame_idx < length:
                             image[frame_idx] = keyframes[i]
+                    # Mask: from start to latent_end (matching start_image.shape[0] + 3)
+                    mask[:, :, :latent_end] = 0.0
+
                 elif i == num_keyframes - 1:
                     # Last keyframe: fill from position to end (like WanFirstLastFrameToVideo)
                     for frame_idx in range(pos, length):
                         image[frame_idx] = keyframes[i]
+                    # Mask: from position to end
+                    mask[:, :, pos:] = 0.0
+
                 else:
                     # Middle keyframes: fill entire latent frame
                     latent_start = latent_idx * 4
@@ -364,56 +368,9 @@ class WanKeyframesToVideo(io.ComfyNode):
                     for frame_idx in range(latent_start, latent_end):
                         if frame_idx < length:
                             image[frame_idx] = keyframes[i]
-
-        # Second pass: Linearly interpolate between keyframes ONLY for N > 2
-        # For 2 keyframes, leave gray (0.5) to match WanFirstLastFrameToVideo behavior
-        if num_keyframes > 2:
-            for i in range(num_keyframes - 1):
-                curr_pos = positions[i]
-                next_pos = positions[i + 1]
-
-                # Get end of current keyframe's latent frame
-                if i == 0:
-                    curr_latent_end = min((curr_pos // 4 + 1) * 4, length)
-                else:
-                    curr_latent_end = min((curr_pos // 4 + 1) * 4, length)
-
-                # Get start of next keyframe's latent frame
-                next_latent_start = (next_pos // 4) * 4
-
-                # Interpolate frames between keyframe latents
-                if curr_latent_end < next_latent_start:
-                    num_interp_frames = next_latent_start - curr_latent_end
-                    for j in range(num_interp_frames):
-                        frame_idx = curr_latent_end + j
-                        if frame_idx < length:
-                            # Linear interpolation weight
-                            alpha = (j + 1) / (num_interp_frames + 1)
-                            image[frame_idx] = keyframes[i] * (1 - alpha) + keyframes[i + 1] * alpha
-
-        # Insert keyframes and set mask regions
-        for i, pos in enumerate(positions):
-            if i < num_keyframes:
-                latent_idx = min(pos // 4, latent_t - 1)
-
-                # Set mask regions based on position
-                if i == 0:
-                    # First keyframe: mask from start up to and including this latent frame
-                    # Similar to WanFirstLastFrameToVideo: mask first frame + 3 more
-                    mask_end = min((latent_idx + 1) * 4, latent_t * 4)
-                    mask[:, :, :mask_end] = 0.0
-                elif i == num_keyframes - 1:
-                    # Last keyframe: mask from this position to end
-                    # Keep original behavior for last frame
-                    mask[:, :, pos:] = 0.0
-                else:
-                    # Middle keyframes: mask the latent frame + extend forward like first keyframe
-                    # This gives model more "anchor" around each keyframe
-                    mask_start = latent_idx * 4
-                    # Extend +3 frames forward (or up to next keyframe)
-                    next_latent_start = min(positions[i+1] // 4 * 4, latent_t * 4) if i < num_keyframes - 1 else latent_t * 4
-                    mask_end = min((latent_idx + 1) * 4 + 3, next_latent_start, latent_t * 4)
-                    mask[:, :, mask_start:mask_end] = 0.0
+                    # Mask: latent frame + 3 more frames (matching WanFirstLastFrameToVideo +3 logic)
+                    mask_end = min(latent_end + 3, length)
+                    mask[:, :, latent_start:mask_end] = 0.0
 
         # Encode image to latent
         concat_latent_image = vae.encode(image[:, :, :, :3])
