@@ -339,42 +339,57 @@ class WanKeyframesToVideo(io.ComfyNode):
         mask = torch.ones((1, 1, latent_t * 4, latent.shape[-2], latent.shape[-1]), device=keyframes.device, dtype=keyframes.dtype)
 
         # First pass: Fill keyframes into their latent frames
-        # CRITICAL: Fill entire latent frames with keyframe content, not just single frames
+        # CRITICAL: Fill entire latent frames with keyframe content for FIRST keyframe
+        # Last keyframe fills only from its position to end (matching WanFirstLastFrameToVideo)
         for i, pos in enumerate(positions):
             if i < num_keyframes:
                 # Calculate which latent frame this position belongs to
                 latent_idx = min(pos // 4, latent_t - 1)
 
-                # Calculate the range of frames in this latent frame
-                latent_start = latent_idx * 4
-                latent_end = min((latent_idx + 1) * 4, length)
-
-                # Fill the ENTIRE latent frame with this keyframe
-                # This is crucial: WanFirstLastFrameToVideo fills multiple frames, not just one
-                for frame_idx in range(latent_start, latent_end):
-                    if frame_idx < length:
+                if i == 0:
+                    # First keyframe: fill entire latent frame
+                    latent_start = latent_idx * 4
+                    latent_end = min((latent_idx + 1) * 4, length)
+                    for frame_idx in range(latent_start, latent_end):
+                        if frame_idx < length:
+                            image[frame_idx] = keyframes[i]
+                elif i == num_keyframes - 1:
+                    # Last keyframe: fill from position to end (like WanFirstLastFrameToVideo)
+                    for frame_idx in range(pos, length):
                         image[frame_idx] = keyframes[i]
+                else:
+                    # Middle keyframes: fill entire latent frame
+                    latent_start = latent_idx * 4
+                    latent_end = min((latent_idx + 1) * 4, length)
+                    for frame_idx in range(latent_start, latent_end):
+                        if frame_idx < length:
+                            image[frame_idx] = keyframes[i]
 
-        # Second pass: Linearly interpolate between keyframes to give model trajectory hints
-        # This replaces gray (0.5) with gradual transitions
-        for i in range(num_keyframes - 1):
-            curr_pos = positions[i]
-            next_pos = positions[i + 1]
+        # Second pass: Linearly interpolate between keyframes ONLY for N > 2
+        # For 2 keyframes, leave gray (0.5) to match WanFirstLastFrameToVideo behavior
+        if num_keyframes > 2:
+            for i in range(num_keyframes - 1):
+                curr_pos = positions[i]
+                next_pos = positions[i + 1]
 
-            # Get end of current keyframe's latent frame
-            curr_latent_end = min((curr_pos // 4 + 1) * 4, length)
-            # Get start of next keyframe's latent frame
-            next_latent_start = (next_pos // 4) * 4
+                # Get end of current keyframe's latent frame
+                if i == 0:
+                    curr_latent_end = min((curr_pos // 4 + 1) * 4, length)
+                else:
+                    curr_latent_end = min((curr_pos // 4 + 1) * 4, length)
 
-            # Interpolate frames between keyframe latents
-            if curr_latent_end < next_latent_start:
-                num_interp_frames = next_latent_start - curr_latent_end
-                for j in range(num_interp_frames):
-                    frame_idx = curr_latent_end + j
-                    if frame_idx < length:
-                        # Linear interpolation weight
-                        alpha = (j + 1) / (num_interp_frames + 1)
-                        image[frame_idx] = keyframes[i] * (1 - alpha) + keyframes[i + 1] * alpha
+                # Get start of next keyframe's latent frame
+                next_latent_start = (next_pos // 4) * 4
+
+                # Interpolate frames between keyframe latents
+                if curr_latent_end < next_latent_start:
+                    num_interp_frames = next_latent_start - curr_latent_end
+                    for j in range(num_interp_frames):
+                        frame_idx = curr_latent_end + j
+                        if frame_idx < length:
+                            # Linear interpolation weight
+                            alpha = (j + 1) / (num_interp_frames + 1)
+                            image[frame_idx] = keyframes[i] * (1 - alpha) + keyframes[i + 1] * alpha
 
         # Insert keyframes and set mask regions
         for i, pos in enumerate(positions):
