@@ -338,7 +338,7 @@ class WanKeyframesToVideo(io.ComfyNode):
         # Mask size: latent_t * 4 to account for 4 sub-frames per latent
         mask = torch.ones((1, 1, latent_t * 4, latent.shape[-2], latent.shape[-1]), device=keyframes.device, dtype=keyframes.dtype)
 
-        # Insert keyframes and set mask regions
+        # First pass: Fill keyframes into their latent frames
         # CRITICAL: Fill entire latent frames with keyframe content, not just single frames
         for i, pos in enumerate(positions):
             if i < num_keyframes:
@@ -355,6 +355,32 @@ class WanKeyframesToVideo(io.ComfyNode):
                     if frame_idx < length:
                         image[frame_idx] = keyframes[i]
 
+        # Second pass: Linearly interpolate between keyframes to give model trajectory hints
+        # This replaces gray (0.5) with gradual transitions
+        for i in range(num_keyframes - 1):
+            curr_pos = positions[i]
+            next_pos = positions[i + 1]
+
+            # Get end of current keyframe's latent frame
+            curr_latent_end = min((curr_pos // 4 + 1) * 4, length)
+            # Get start of next keyframe's latent frame
+            next_latent_start = (next_pos // 4) * 4
+
+            # Interpolate frames between keyframe latents
+            if curr_latent_end < next_latent_start:
+                num_interp_frames = next_latent_start - curr_latent_end
+                for j in range(num_interp_frames):
+                    frame_idx = curr_latent_end + j
+                    if frame_idx < length:
+                        # Linear interpolation weight
+                        alpha = (j + 1) / (num_interp_frames + 1)
+                        image[frame_idx] = keyframes[i] * (1 - alpha) + keyframes[i + 1] * alpha
+
+        # Insert keyframes and set mask regions
+        for i, pos in enumerate(positions):
+            if i < num_keyframes:
+                latent_idx = min(pos // 4, latent_t - 1)
+
                 # Set mask regions based on position
                 if i == 0:
                     # First keyframe: mask from start up to and including this latent frame
@@ -366,10 +392,12 @@ class WanKeyframesToVideo(io.ComfyNode):
                     # Keep original behavior for last frame
                     mask[:, :, pos:] = 0.0
                 else:
-                    # Middle keyframes: mask the entire latent frame containing this keyframe
-                    # This ensures the keyframe is properly preserved in latent space
+                    # Middle keyframes: mask the latent frame + extend forward like first keyframe
+                    # This gives model more "anchor" around each keyframe
                     mask_start = latent_idx * 4
-                    mask_end = min((latent_idx + 1) * 4, latent_t * 4)
+                    # Extend +3 frames forward (or up to next keyframe)
+                    next_latent_start = min(positions[i+1] // 4 * 4, latent_t * 4) if i < num_keyframes - 1 else latent_t * 4
+                    mask_end = min((latent_idx + 1) * 4 + 3, next_latent_start, latent_t * 4)
                     mask[:, :, mask_start:mask_end] = 0.0
 
         # Encode image to latent
