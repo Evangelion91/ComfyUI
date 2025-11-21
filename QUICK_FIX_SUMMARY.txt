@@ -1,0 +1,100 @@
+═══════════════════════════════════════════════════════════════════════════
+  РЕШЕНИЕ ПРОБЛЕМЫ КОМПИЛЯЦИИ SAGEATTENTION3 НА WINDOWS (RTX 5090)
+═══════════════════════════════════════════════════════════════════════════
+
+ПРИЧИНА ОШИБКИ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. В kernel_traits.h (строки 154-155) отсутствует ключевое слово 'typename'
+   перед зависимыми типами LayoutSF и SfAtom
+
+2. В setup.py не хватает специальных флагов компилятора MSVC:
+   /Zc:__cplusplus, /bigobj, /permissive-
+
+ОШИБКИ В ЛОГЕ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+error C2061: syntax error: identifier 'LayoutSF'
+error C2061: syntax error: identifier 'SfAtom'
+warning C4346: 'LayoutSF': dependent name is not a type
+
+ТРИ ВАРИАНТА РЕШЕНИЯ:
+═══════════════════════════════════════════════════════════════════════════
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║ ВАРИАНТ 1: АВТОМАТИЧЕСКОЕ ИСПРАВЛЕНИЕ (РЕКОМЕНДУЕТСЯ)                ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+Скопируйте файл fix_sageattention3.py на Windows машину и запустите:
+
+    python fix_sageattention3.py "C:\Users\gta4r\Desktop\ComfyUI\ComfyUI_windows_portable\SageAttention\sageattention3_blackwell"
+
+Скрипт автоматически:
+✓ Создаст резервные копии (.backup)
+✓ Добавит 'typename' в kernel_traits.h
+✓ Добавит флаги MSVC в setup.py
+✓ Покажет команду для компиляции
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║ ВАРИАНТ 2: РУЧНОЕ ИСПРАВЛЕНИЕ                                        ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+Файл 1: sageattn3\blackwell\kernel_traits.h (строки 154-155)
+────────────────────────────────────────────────────────────────────────
+БЫЛО:
+    using LayoutSF = SharedStorageQKVO::LayoutSF;
+    using SfAtom = SharedStorageQKVO::SfAtom;
+
+СТАЛО:
+    using LayoutSF = typename SharedStorageQKVO::LayoutSF;
+    using SfAtom = typename SharedStorageQKVO::SfAtom;
+
+Файл 2: setup.py (добавить после определения extra_compile_args)
+────────────────────────────────────────────────────────────────────────
+import os
+
+# Fix for Windows/MSVC compilation
+if os.name == 'nt':  # Windows
+    extra_compile_args["cxx"].extend([
+        "/Zc:__cplusplus",
+        "/bigobj",
+        "/permissive-"
+    ])
+    extra_compile_args["nvcc"].extend([
+        "-Xcompiler", "/Zc:__cplusplus",
+        "-Xcompiler", "/bigobj",
+        "-Xcompiler", "/permissive-"
+    ])
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║ ВАРИАНТ 3: ИСПОЛЬЗОВАТЬ ГОТОВЫЙ ФОРК                                 ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+Вместо исправления вашей версии, используйте уже исправленную:
+
+    git clone https://github.com/sdbds/SageAttention-for-windows.git
+    cd SageAttention-for-windows/sageattention3_blackwell
+    python setup.py build_ext --inplace
+
+ПОСЛЕ ИСПРАВЛЕНИЯ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+cd C:\Users\gta4r\Desktop\ComfyUI\ComfyUI_windows_portable\SageAttention\sageattention3_blackwell
+.\..\..\python_embeded\python.exe setup.py build_ext --inplace
+
+ДОПОЛНИТЕЛЬНО:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Если останутся warning #3357-D о C++20 features, можно изменить:
+- В setup.py: заменить все "-std=c++17" на "-std=c++20"
+
+ИСТОЧНИКИ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• HuggingFace Discussion #7: https://huggingface.co/jt-zhang/SageAttention3/discussions/7
+• HuggingFace PR #5: https://huggingface.co/jt-zhang/SageAttention3/discussions/5
+• GitHub Issue #268: https://github.com/thu-ml/SageAttention/issues/268
+• Windows Fork: https://github.com/sdbds/SageAttention-for-windows
+
+ФАЙЛЫ В ЭТОМ РЕПОЗИТОРИИ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. sageattention3_fix.md - Подробная инструкция с примерами
+2. fix_sageattention3.py - Автоматический скрипт исправления
+3. QUICK_FIX_SUMMARY.txt - Этот файл (краткая сводка)
+
+═══════════════════════════════════════════════════════════════════════════
