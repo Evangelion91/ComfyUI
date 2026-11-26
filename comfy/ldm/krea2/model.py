@@ -33,8 +33,8 @@ class RMSNorm(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dtype = x.dtype
         weight = comfy.model_management.cast_to(self.scale, dtype=torch.float32, device=x.device) + 1.0
-        profile = sm120.active_sample.get()
-        if profile is not None and not torch.compiler.is_compiling():
+        profile = sm120.current_sample()
+        if profile is not None:
             result = sm120.rms_norm(profile, x, weight, self.eps)
             if result is not None:
                 return result
@@ -227,8 +227,8 @@ class SingleStreamBlock(nn.Module):
             del mlp
             return x
 
-        profile = sm120.active_sample.get()
-        if profile is not None and not torch.compiler.is_compiling():
+        profile = sm120.current_sample()
+        if profile is not None:
             pre = sm120.affine(profile, self.prenorm(x), 1 + prescale, preshift)
             x = sm120.affine(profile, x, pregate, self.attn(pre, freqs, mask, transformer_options=transformer_options), residual=True)
             del pre

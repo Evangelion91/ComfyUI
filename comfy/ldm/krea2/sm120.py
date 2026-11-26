@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 import torch
+from comfy_kitchen.float_utils import to_blocked
 
 from comfy.cli_args import args
 from comfy.quant_ops import QuantizedTensor
@@ -24,6 +25,12 @@ CUBLASLT_SHA256 = "cad63434448e7141629e240ea093ad596a7ef6a0f67b468ba9bc1df6e1eee
 
 Pointer = ctypes.c_void_p
 Size = ctypes.c_uint64
+
+
+def current_sample():
+    if torch.compiler.is_compiling():
+        return None
+    return active_sample.get()
 
 
 def bind(library, name, arguments, returns=ctypes.c_int):
@@ -50,8 +57,6 @@ class FP8Library:
 
 
 def unit_scales(device, rows, columns):
-    from comfy_kitchen.float_utils import to_blocked
-
     # E8M0 exponent 127 encodes 1. The original per-tensor scales remain in alpha.
     scales = torch.full((rows, (columns + 31) // 32), 127, dtype=torch.uint8, device=device)
     return to_blocked(scales, flatten=False)
@@ -295,7 +300,8 @@ def eligible(sampler, noise, positive, negative, cfg, sigmas, denoise_mask):
         return False
     if getattr(model.diffusion_model.blocks[0].attn.wq, "quant_format", None) != "float8_e4m3fn":
         return False
-    if any(sampler.model_options.get(key) for key in (
+    model_options = patcher.model_options
+    if any(model_options.get(key) for key in (
         "disable_cfg1_optimization", "model_function_wrapper", "sampler_cfg_function",
         "sampler_pre_cfg_function", "sampler_post_cfg_function", "sampler_calc_cond_batch_function",
     )):
@@ -309,7 +315,7 @@ def eligible(sampler, noise, positive, negative, cfg, sigmas, denoise_mask):
     for _, options in (*positive, *(negative or ())):
         if any(options.get(key) is not None for key in ("hooks", "mask", "area", "control", "reference_latents")):
             return False
-    transformer_options = sampler.model_options.get("transformer_options", {})
+    transformer_options = model_options.get("transformer_options", {})
     return not any(transformer_options.get(key) for key in (
         "patches", "patches_replace", "wrappers", "callbacks", "optimized_attention_override",
     ))

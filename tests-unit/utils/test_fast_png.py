@@ -1,3 +1,5 @@
+import os
+import stat
 import struct
 import zlib
 
@@ -46,3 +48,20 @@ def test_unfiltered_rgb_png_roundtrip(tmp_path, include_metadata):
     assert stream[2] & 0b110 == 0  # DEFLATE BTYPE=0 stores the block without compression.
     assert zlib.decompress(stream) == b"".join(b"\0" + row.tobytes() for row in pixels)
     assert list(tmp_path.iterdir()) == [destination]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX output permissions")
+@pytest.mark.parametrize("umask", [0o022, 0o077])
+def test_fast_png_uses_pillow_output_permissions(tmp_path, umask):
+    pixels = np.zeros((2, 3, 3), dtype=np.uint8)
+    reference = tmp_path / "pillow.png"
+    destination = tmp_path / "unfiltered.png"
+
+    previous_umask = os.umask(umask)
+    try:
+        Image.fromarray(pixels).save(reference)
+        save_unfiltered_rgb_png(destination, pixels, None)
+    finally:
+        os.umask(previous_umask)
+
+    assert stat.S_IMODE(destination.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)

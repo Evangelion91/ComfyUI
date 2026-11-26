@@ -1,6 +1,6 @@
 from pathlib import Path
 import struct
-import tempfile
+from uuid import uuid4
 import zlib
 
 import numpy as np
@@ -15,10 +15,11 @@ def save_unfiltered_rgb_png(path, pixels, metadata):
     rows[:, 1:] = pixels.reshape(height, width * 3)
 
     path = Path(path)
-    temporary = None
+    temporary = path.with_name(f".{uuid4().hex}.tmp")
+    # Exclusive creation uses the same umask-derived permissions as Pillow.
+    file = temporary.open("xb")
     try:
-        with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as file:
-            temporary = Path(file.name)
+        with file:
             file.write(b"\x89PNG\r\n\x1a\n")
             putchunk(file, b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
             if metadata is not None:
@@ -28,5 +29,4 @@ def save_unfiltered_rgb_png(path, pixels, metadata):
             putchunk(file, b"IEND")
         temporary.replace(path)
     finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)

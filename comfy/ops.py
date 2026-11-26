@@ -1572,8 +1572,8 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 return _quantized_weight_state_dict(self, sd, prefix, extra_quant_params=("input_scale", "pre_quant_scale"))
 
             def _forward(self, input, weight, bias):
-                profile = sm120.active_sample.get()
-                if profile is not None and not torch.compiler.is_compiling():
+                profile = sm120.current_sample()
+                if profile is not None:
                     result = sm120.linear(profile, input, weight, bias)
                     if result is not None:
                         return result
