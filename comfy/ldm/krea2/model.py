@@ -166,6 +166,14 @@ class TextFusionTransformer(nn.Module):
         return x
 
 
+def _modulate(x, scale, shift):
+    scaled = (1 + scale) * x
+    # Hooks can return a shift that promotes or broadcasts the scaled activation.
+    if shift.dtype == scale.dtype and shift.shape == scale.shape:
+        return scaled.add_(shift)
+    return scaled + shift
+
+
 class SingleStreamBlock(nn.Module):
     def __init__(self, features, heads, multiplier, bias=False, kvheads=None, device=None, dtype=None, operations=None):
         super().__init__()
@@ -213,8 +221,8 @@ class SingleStreamBlock(nn.Module):
             del mlp
             return x
 
-        x = x + pregate * self.attn((1 + prescale) * self.prenorm(x) + preshift, freqs, mask, transformer_options=transformer_options)
-        x = x + postgate * self.mlp((1 + postscale) * self.postnorm(x) + postshift)
+        x = x + pregate * self.attn(_modulate(self.prenorm(x), prescale, preshift), freqs, mask, transformer_options=transformer_options)
+        x = x + postgate * self.mlp(_modulate(self.postnorm(x), postscale, postshift))
         return x
 
 
@@ -227,7 +235,7 @@ class LastLayer(nn.Module):
 
     def forward(self, x, tvec):
         scale, shift = self.modulation(tvec)
-        x = (1 + scale) * self.norm(x) + shift
+        x = _modulate(self.norm(x), scale, shift)
         return self.linear(x)
 
 
