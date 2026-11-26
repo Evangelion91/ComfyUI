@@ -71,6 +71,22 @@ def test_uses_patcher_attention_options_when_sampler_options_are_empty(square_pr
     assert not sm120.eligible(*square_profile)
 
 
+@pytest.mark.parametrize("is_eligible", [False, True], ids=["ineligible", "backend-unavailable"])
+def test_nested_fallback_sampling_suspends_outer_profile(monkeypatch, is_eligible):
+    monkeypatch.setattr(sm120, "eligible", lambda *_: is_eligible)
+    monkeypatch.setattr(sm120, "load_backend", lambda _: None)
+    outer_profile = object()
+    token = sm120.active_sample.set(outer_profile)
+    try:
+        with pytest.raises(RuntimeError, match="nested sample failed"):
+            with sm120.sample_scope("kernels", None, None, None, None, 1, None, None):
+                assert sm120.current_sample() is None
+                raise RuntimeError("nested sample failed")
+        assert sm120.current_sample() is outer_profile
+    finally:
+        sm120.active_sample.reset(token)
+
+
 @pytest.fixture
 def unreadable_sample_context(monkeypatch):
     def fail_if_read():

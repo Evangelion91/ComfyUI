@@ -323,22 +323,21 @@ def eligible(sampler, noise, positive, negative, cfg, sigmas, denoise_mask):
 
 @contextmanager
 def sample_scope(folder, sampler, noise, positive, negative, cfg, sigmas, denoise_mask):
-    if not eligible(sampler, noise, positive, negative, cfg, sigmas, denoise_mask):
-        yield
-        return
-    backend = load_backend(folder)
-    if backend is None:
-        yield
-        return
-    sample = Sample(backend)
+    sample = None
+    if eligible(sampler, noise, positive, negative, cfg, sigmas, denoise_mask):
+        backend = load_backend(folder)
+        if backend is not None:
+            sample = Sample(backend)
+    # A fallback sample can run inside another sample's callback.
     token = active_sample.set(sample)
     try:
         yield
     finally:
         active_sample.reset(token)
-        sample.close()
-        logging.info(
-            "Krea 2 SM120: %d tuned MXFP8, %d other MXFP8, %d tuned FP16, %d RMSNorm, %d affine, %d text preparation",
-            sample.tuned_fp8_calls, sample.other_fp8_calls, sample.fp16_calls, sample.rms_calls,
-            sample.affine_calls, sample.text_preparations,
-        )
+        if sample is not None:
+            sample.close()
+            logging.info(
+                "Krea 2 SM120: %d tuned MXFP8, %d other MXFP8, %d tuned FP16, %d RMSNorm, %d affine, %d text preparation",
+                sample.tuned_fp8_calls, sample.other_fp8_calls, sample.fp16_calls, sample.rms_calls,
+                sample.affine_calls, sample.text_preparations,
+            )
