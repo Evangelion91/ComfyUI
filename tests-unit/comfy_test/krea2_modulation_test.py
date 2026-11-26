@@ -26,7 +26,10 @@ def test_dense_modulation_preserves_rounding(dtype):
 
     actual = block(x, vec, None)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    for grad, reference in zip(torch.autograd.grad(actual.sum(), (x, vec)), torch.autograd.grad(expected.sum(), (x, vec))):
+    inputs_and_parameters = (x, vec, *block.parameters())
+    actual_gradients = torch.autograd.grad(actual.sum(), inputs_and_parameters)
+    expected_gradients = torch.autograd.grad(expected.sum(), inputs_and_parameters)
+    for grad, reference in zip(actual_gradients, expected_gradients):
         torch.testing.assert_close(grad, reference, rtol=0, atol=0)
 
 
