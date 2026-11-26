@@ -19,6 +19,7 @@ import comfy.utils
 from comfy.ldm.flux.layers import EmbedND, timestep_embedding
 from comfy.ldm.flux.math import apply_rope
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_masked
+from . import sm120
 
 
 class RMSNorm(nn.Module):
@@ -32,6 +33,11 @@ class RMSNorm(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dtype = x.dtype
         weight = comfy.model_management.cast_to(self.scale, dtype=torch.float32, device=x.device) + 1.0
+        profile = sm120.active_sample.get()
+        if profile is not None and not torch.compiler.is_compiling():
+            result = sm120.rms_norm(profile, x, weight, self.eps)
+            if result is not None:
+                return result
         return F.rms_norm(x.float(), (x.shape[-1],), weight=weight, eps=self.eps).to(dtype)
 
 
@@ -221,6 +227,14 @@ class SingleStreamBlock(nn.Module):
             del mlp
             return x
 
+        profile = sm120.active_sample.get()
+        if profile is not None and not torch.compiler.is_compiling():
+            pre = sm120.affine(profile, self.prenorm(x), 1 + prescale, preshift)
+            x = sm120.affine(profile, x, pregate, self.attn(pre, freqs, mask, transformer_options=transformer_options), residual=True)
+            del pre
+            post = sm120.affine(profile, self.postnorm(x), 1 + postscale, postshift)
+            return sm120.affine(profile, x, postgate, self.mlp(post), residual=True)
+
         x = x + pregate * self.attn(_modulate(self.prenorm(x), prescale, preshift), freqs, mask, transformer_options=transformer_options)
         x = x + postgate * self.mlp(_modulate(self.postnorm(x), postscale, postshift))
         return x
@@ -311,8 +325,9 @@ class SingleStreamDiT(nn.Module):
         bs, _, h_orig, w_orig = x.shape
         patch = self.patch
 
-        # context arrives as (B, seq, txtlayers*txtdim); reshape to (B, txtlayers, seq, txtdim).
-        context = self._unpack_context(context)
+        prepared = kwargs.get("krea2_prepared_text")
+        if prepared is None:
+            context = self._unpack_context(context)
 
         img, imgpos, h_, w_ = self.process_img(x)
         img_tokens = img.shape[1]
@@ -346,7 +361,7 @@ class SingleStreamDiT(nn.Module):
             t0 = self.tmlp(timestep_embedding(torch.zeros_like(timesteps), self.tdim).unsqueeze(1).to(img.dtype))
             tvec = torch.cat((tvec, self.tproj(t0)), dim=0)
 
-        context = self.txtfusion(context, mask=None, transformer_options=transformer_options)
+        context = self.txtfusion(context, mask=None, transformer_options=transformer_options) if prepared is None else prepared
         context = self.txtmlp(context)
 
         txtlen = context.shape[1]
@@ -388,6 +403,9 @@ class SingleStreamDiT(nn.Module):
         if temporal:
             out = out.reshape(b5, t5, self.channels, h_orig, w_orig).movedim(1, 2)
         return out
+
+    def preprocess_text_embeds(self, context):
+        return self.txtfusion(self._unpack_context(context))
 
     def _unpack_context(self, context):
         # context: (B, seq, txtlayers*txtdim) -> (B, seq, txtlayers, txtdim).
