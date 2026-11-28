@@ -1,4 +1,4 @@
-"""The opt-in, exact FP16/E4M3 profile for Krea 2 Turbo on Windows SM120."""
+"""Opt-in FP16/E4M3 acceleration for Krea 2 Turbo on Windows SM120."""
 
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -17,8 +17,8 @@ from comfy.quant_ops import QuantizedTensor
 
 
 active_sample = ContextVar("krea2_sm120_sample", default=None)
-ALGORITHMS = {1536: 2, 6144: 0, 16384: 2}
-ROWS = 16862
+TUNED_FP8_ALGORITHMS = {1536: 2, 6144: 0, 16384: 2}
+TUNED_ROWS = 16862
 WIDTH = 6144
 WORKSPACE_SIZE = 32 << 20
 CUBLASLT_SHA256 = "cad63434448e7141629e240ea093ad596a7ef6a0f67b468ba9bc1df6e1eeee33"
@@ -174,7 +174,7 @@ class Sample:
         stream = torch.cuda.current_stream(x.device).cuda_stream
         workspace = self.workspace(x.device, stream)
         key = x.device, stream, rows, outputs, columns, bias is not None
-        algorithm = ALGORITHMS.get(outputs) if rows == ROWS and columns == WIDTH and bias is None else None
+        algorithm = TUNED_FP8_ALGORITHMS.get(outputs) if rows == TUNED_ROWS and columns == WIDTH and bias is None else None
         if key not in self.fp8_plans:
             library = self.backend.tuned_fp8 if algorithm is not None else self.backend.default_fp8
             self.fp8_plans[key] = FP8Plan(library, x, weight, bias, workspace, algorithm)
@@ -193,7 +193,7 @@ class Sample:
             bias is not None or type(x) is not torch.Tensor or type(weight) not in (torch.Tensor, torch.nn.Parameter)
             or not x.is_cuda or x.dtype != torch.float16 or weight.device != x.device or weight.dtype != x.dtype
             or x.ndim not in (2, 3) or weight.ndim != 2 or not x.is_contiguous() or not weight.is_contiguous()
-            or x.shape[-2] != ROWS or x.numel() // x.shape[-1] != ROWS
+            or x.shape[-2] != TUNED_ROWS or x.numel() // x.shape[-1] != TUNED_ROWS
             or weight.shape[0] != WIDTH or weight.shape[1] not in (WIDTH, 16384) or x.shape[-1] != weight.shape[1]
         ):
             return None
@@ -202,7 +202,7 @@ class Sample:
         key = x.device, stream, weight.shape[1]
         if key not in self.half_plans:
             handle = Pointer()
-            self.backend.prepare_half(ctypes.byref(handle), ROWS, WIDTH, weight.shape[1], workspace.numel())
+            self.backend.prepare_half(ctypes.byref(handle), TUNED_ROWS, WIDTH, weight.shape[1], workspace.numel())
             self.half_plans[key] = handle
         handle = self.half_plans[key]
         if not handle:
@@ -292,7 +292,7 @@ def eligible(sampler, noise, positive, negative, cfg, sigmas, denoise_mask):
         or not args.use_sage_attention or not torch.backends.cuda.matmul.allow_fp16_accumulation
         or sampler.sampler != "euler" or sampler.scheduler != "simple" or sampler.steps != 8
         or sampler.denoise != 1.0 or cfg != 1 or sigmas.numel() != 9 or denoise_mask is not None
-        or tuple(noise.shape) not in ((1, 16, 256, 256), (1, 16, 1, 256, 256))
+        or noise.shape[:-2] not in ((1, 16), (1, 16, 1)) or 0 in noise.shape[-2:]
         or not patcher.loaded_size() or model.current_weight_patches_uuid != patcher.patches_uuid
         or patcher.hook_patches or patcher.object_patches or patcher.injections
         or any(patcher.wrappers.values()) or any(patcher.callbacks.values())
@@ -309,7 +309,10 @@ def eligible(sampler, noise, positive, negative, cfg, sigmas, denoise_mask):
     if positive is None or len(positive) != 1:
         return False
     context, _ = positive[0]
-    if not torch.is_tensor(context) or context.shape != (1, 478, 30720):
+    if (
+        not torch.is_tensor(context) or context.ndim != 3
+        or context.shape[0] != 1 or context.shape[1] == 0 or context.shape[2] != 30720
+    ):
         return False
     # Hooks from the negative branch may apply to both branches, including at CFG 1.
     for _, options in (*positive, *(negative or ())):

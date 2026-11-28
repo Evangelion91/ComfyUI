@@ -1720,7 +1720,7 @@ class SaveImage:
             filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
             file = f"{filename_with_batch_num}_{counter:05}_.png"
             path = os.path.join(full_output_folder, file)
-            if fast_png and pixels.shape == (2048, 2048, 3):
+            if fast_png and pixels.ndim == 3 and pixels.shape[-1] == 3 and pixels.size:
                 save_unfiltered_rgb_png(path, pixels, metadata)
             else:
                 Image.fromarray(pixels).save(path, pnginfo=metadata, compress_level=self.compress_level)

@@ -48,6 +48,38 @@ def test_admits_verified_square_profile(square_profile):
     assert sm120.eligible(*square_profile)
 
 
+@pytest.mark.parametrize(("noise_shape", "tokens"), [
+    ((1, 16, 1, 256, 256), 13),
+    ((1, 16, 1, 255, 255), 478),
+    ((1, 16, 320, 240), 478),
+    ((1, 16, 1, 125, 96), 645),
+])
+def test_admits_variable_resolution_and_prompt_length(square_profile, noise_shape, tokens):
+    sampler, _, _, negative, cfg, sigmas, mask = square_profile
+    noise = torch.empty(noise_shape, device="meta")
+    positive = [[torch.empty((1, tokens, 30720), device="meta"), {}]]
+    assert sm120.eligible(sampler, noise, positive, negative, cfg, sigmas, mask)
+
+
+@pytest.mark.parametrize("noise_shape", [
+    (2, 16, 320, 240),
+    (1, 4, 320, 240),
+    (1, 16, 2, 320, 240),
+    (1, 16, 0, 240),
+])
+def test_other_latent_layouts_keep_stock_sampling(square_profile, noise_shape):
+    sampler, _, positive, negative, cfg, sigmas, mask = square_profile
+    noise = torch.empty(noise_shape, device="meta")
+    assert not sm120.eligible(sampler, noise, positive, negative, cfg, sigmas, mask)
+
+
+@pytest.mark.parametrize("context_shape", [(13, 30720), (2, 13, 30720), (1, 0, 30720), (1, 13, 2560)])
+def test_other_conditioning_layouts_keep_stock_sampling(square_profile, context_shape):
+    sampler, noise, _, negative, cfg, sigmas, mask = square_profile
+    positive = [[torch.empty(context_shape, device="meta"), {}]]
+    assert not sm120.eligible(sampler, noise, positive, negative, cfg, sigmas, mask)
+
+
 @pytest.mark.parametrize("key", ["optimized_attention_override", "patches_replace"])
 def test_standard_attention_extensions_keep_the_stock_path(square_profile, key):
     square_profile[0].model.model_options["transformer_options"][key] = object()

@@ -202,8 +202,8 @@ class PerformanceFeature(enum.Enum):
     AutoTune = "autotune"
 
 parser.add_argument("--fast", nargs="*", type=PerformanceFeature, help="Enable some untested and potentially quality deteriorating optimizations. This is used to test new features so using it might crash your comfyui. --fast with no arguments enables everything. You can pass a list specific optimizations if you only want to enable specific ones. Current valid optimizations: {}".format(" ".join(map(lambda c: c.value, PerformanceFeature))))
-parser.add_argument("--krea2-sm120", type=Path, metavar="KERNEL_DIRECTORY", help="Enable the opt-in RTX 5090 Krea 2 Turbo 2048² profile on Windows with locally built kernels.")
-parser.add_argument("--fast-unfiltered-rgb-png", action="store_true", help="Write square 2048² RGB SaveImage outputs as lossless uncompressed PNGs.")
+parser.add_argument("--krea2-sm120", type=Path, metavar="KERNEL_DIRECTORY", help="Enable the opt-in RTX 5090 Krea 2 Turbo profile on Windows with locally built kernels.")
+parser.add_argument("--fast-unfiltered-rgb-png", action="store_true", help="Write RGB SaveImage outputs as lossless uncompressed PNGs.")
 
 parser.add_argument("--debug-hang", action="store_true", help="Enable stack trace dumps on Ctrl-C for debugging hangs.")
 
